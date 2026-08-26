@@ -1,12 +1,40 @@
 # MCP banco local
 
-Configuração do MCP de banco na sua máquina, dentro de `/home/reed/www/workspace/mcp-banco`.
+Servidor MCP local para consulta SQL em bancos `Postgres` e `MySQL`.
 
 ## Pré-requisitos
 
-- Go instalado
+- Go 1.24 ou superior instalado
 - Banco acessível na máquina local ou na rede
 - Variáveis de ambiente configuradas em `.env` ou no ambiente do sistema
+
+### Instalação do Go
+
+Verifique primeiro se o Go já está disponível:
+
+```bash
+go version
+```
+
+Se o comando não existir, instale o Go pela página oficial:
+
+```text
+https://go.dev/dl/
+```
+
+No Linux, uma forma comum é extrair o pacote em `/usr/local` e adicionar o binário ao `PATH`:
+
+```bash
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+```
+
+Depois, valide a instalação:
+
+```bash
+go version
+```
 
 ## Variáveis de ambiente
 
@@ -16,9 +44,9 @@ O projeto lê as variáveis abaixo na inicialização:
 DB_TYPE=postgres
 DB_HOST=localhost
 DB_PORT=5432
-DB_NAME=sete
-DB_USER=root
-DB_PASSWORD=123123
+DB_NAME=meu_banco
+DB_USER=usuario
+DB_PASSWORD=senha
 DB_SSLMODE=disable
 ```
 
@@ -27,6 +55,17 @@ Também é possível usar uma DSN completa:
 ```env
 DB_TYPE=postgres
 DB_DSN=postgres://usuario:senha@localhost:5432/seu_banco?sslmode=disable
+```
+
+Exemplo para MySQL:
+
+```env
+DB_TYPE=mysql
+DB_HOST=localhost
+DB_PORT=3306
+DB_NAME=meu_banco
+DB_USER=usuario
+DB_PASSWORD=senha
 ```
 
 Campos suportados:
@@ -40,42 +79,60 @@ Campos suportados:
 - `DB_PASSWORD`: senha
 - `DB_SSLMODE`: usado no Postgres; padrão `disable`
 
+Regras de seleção do banco:
+
+- se `DB_TYPE` estiver definido, ele define o driver
+- se `DB_TYPE` não estiver definido, o projeto tenta inferir o driver a partir de `DB_DSN`
+
 ## Executar localmente
 
-Para rodar em desenvolvimento:
+1. Copie o arquivo de exemplo para `.env` e ajuste os dados do banco:
+
+```bash
+cp .env-exemple .env
+```
+
+2. Edite o `.env` com os dados corretos do Postgres ou MySQL.
+
+3. Baixe as dependências:
+
+```bash
+go mod download
+```
+
+4. Execute o servidor em modo desenvolvimento:
 
 ```bash
 go run .
 ```
 
-Para gerar o binário local:
+Ou gere o binário local:
 
 ```bash
 go build -o banco-mcp .
-```
-
-Para executar o binário:
-
-```bash
 ./banco-mcp
 ```
 
 O servidor roda em `stdio`, então ele deve ser iniciado por um cliente MCP.
 
+Se tudo estiver correto, o processo vai permanecer ativo aguardando conexões do cliente MCP.
+
 ## Configuração no cliente MCP
 
-Exemplo simples de configuração do servidor local:
+Exemplo simples de configuração do servidor local. Ajuste o path para o diretório do seu workspace na máquina:
 
 ```json
 {
   "mcpServers": {
     "banco": {
-      "command": "/home/reed/www/workspace/mcp-banco/banco-mcp",
-      "cwd": "/home/reed/www/workspace/mcp-banco"
+      "command": "~/www/mcp-banco-golang/banco-mcp",
+      "cwd": "~/www/mcp-banco-golang"
     }
   }
 }
 ```
+
+Se o seu workspace estiver em outro diretório, substitua o path acima pelo caminho local correspondente.
 
 Se preferir não gerar binário:
 
@@ -85,7 +142,7 @@ Se preferir não gerar binário:
     "banco": {
       "command": "go",
       "args": ["run", "."],
-      "cwd": "/home/reed/www/workspace/mcp-banco"
+      "cwd": "~/www/mcp-banco-golang"
     }
   }
 }
@@ -96,12 +153,36 @@ Se preferir não gerar binário:
 O MCP registra a ferramenta:
 
 - `query`: executa uma consulta SQL no banco configurado e retorna colunas e linhas em JSON
+- `list_tables`: lista as tabelas visíveis no banco configurado
 
 Exemplo de uso:
 
 ```json
 {
   "sql": "select 1 as ok"
+}
+```
+
+Exemplo de uso com MySQL:
+
+```json
+{
+  "sql": "select now() as server_time"
+}
+```
+
+Exemplo de uso para listar tabelas:
+
+```json
+{}
+```
+
+Resposta esperada:
+
+```json
+{
+  "tables": ["clientes", "pedidos"],
+  "rowCount": 2
 }
 ```
 

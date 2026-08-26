@@ -1,4 +1,4 @@
-module mcp-postgres
+module mcp-banco-golang
 
 go 1.24.0
 
