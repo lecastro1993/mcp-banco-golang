@@ -5,3 +5,4 @@ banco-mcp
 mcp-banco-golang
 *.exe
 *.test
+opencode.json

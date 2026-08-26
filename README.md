@@ -119,6 +119,14 @@ Se tudo estiver correto, o processo vai permanecer ativo aguardando conexões do
 
 ## Configuração no cliente MCP
 
+Para usar com o OpenCode, copie o arquivo de exemplo e ajuste os dados do banco no `opencode.json`:
+
+```bash
+cp opencode-exemple.json opencode.json
+```
+
+O arquivo `opencode.json` fica local e pode receber os valores de `DB_TYPE`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` e `DB_SSLMODE` conforme o banco que será consultado.
+
 Exemplo simples de configuração do servidor local. Ajuste o path para o diretório do seu workspace na máquina:
 
 ```json
