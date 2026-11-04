@@ -1,6 +1,6 @@
 # MCP banco local
 
-Servidor MCP local para consulta SQL em bancos `Postgres` e `MySQL`.
+Servidor MCP local para consulta SQL em múltiplos bancos `Postgres` e `MySQL`.
 
 ## Pré-requisitos
 
@@ -38,7 +38,7 @@ go version
 
 ## Variáveis de ambiente
 
-O projeto lê as variáveis abaixo na inicialização:
+Para uma única conexão, o projeto continua aceitando as variáveis abaixo:
 
 ```env
 DB_TYPE=postgres
@@ -83,6 +83,23 @@ Regras de seleção do banco:
 
 - se `DB_TYPE` estiver definido, ele define o driver
 - se `DB_TYPE` não estiver definido, o projeto tenta inferir o driver a partir de `DB_DSN`
+
+### Múltiplos bancos
+
+Para conectar vários bancos no mesmo servidor MCP, defina `DB_CONNECTIONS` como um array JSON. Cada conexão precisa de um `name` único:
+
+```env
+DB_DEFAULT=principal
+DB_CONNECTIONS=[{"name":"principal","driver":"postgres","host":"localhost","port":"5432","database":"vendas","user":"postgres","password":"senha","sslmode":"disable"},{"name":"relatorios","driver":"mysql","host":"localhost","port":"3306","database":"relatorios","user":"root","password":"senha"}]
+```
+
+Também é possível usar `dsn` em cada conexão:
+
+```env
+DB_CONNECTIONS=[{"name":"principal","driver":"postgres","dsn":"postgres://usuario:senha@localhost:5432/vendas?sslmode=disable"},{"name":"legado","driver":"mysql","dsn":"root:senha@tcp(localhost:3306)/legado?parseTime=true"}]
+```
+
+`DB_DEFAULT` define qual conexão será usada quando o campo `database` não for informado. Se ele não for definido, a primeira conexão do array será usada.
 
 ## Executar localmente
 
@@ -160,13 +177,15 @@ Se preferir não gerar binário:
 
 O MCP registra a ferramenta:
 
-- `query`: executa uma consulta SQL no banco configurado e retorna colunas e linhas em JSON
-- `list_tables`: lista as tabelas visíveis no banco configurado
+- `list_databases`: lista os nomes das conexões disponíveis e o banco padrão
+- `query`: executa uma consulta SQL e retorna colunas e linhas em JSON; aceita `database` opcional
+- `list_tables`: lista as tabelas visíveis; aceita `database` opcional
 
 Exemplo de uso:
 
 ```json
 {
+  "database": "relatorios",
   "sql": "select 1 as ok"
 }
 ```
@@ -199,3 +218,7 @@ Resposta esperada:
 - O arquivo `.env` é carregado automaticamente se existir
 - Se `DB_DSN` não for informada, a conexão é montada a partir das demais variáveis
 - Se a configuração estiver incompleta, o processo encerra com erro na inicialização
+
+## Guia para agentes
+
+O passo a passo completo para configurar múltiplos bancos está em [`.agents/README.md`](.agents/README.md).

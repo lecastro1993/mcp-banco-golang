@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,10 +19,23 @@ import (
 )
 
 type App struct {
-	driver   string
-	postgres *pgxpool.Pool
-	mysql    *sql.DB
-	logger   *log.Logger
+	connections     map[string]*DatabaseConnection
+	defaultDatabase string
+	logger          *log.Logger
+}
+
+type DatabaseConnection struct {
+	Name     string        `json:"name"`
+	Driver   string        `json:"driver"`
+	DSN      string        `json:"dsn"`
+	Host     string        `json:"host"`
+	Port     string        `json:"port"`
+	Database string        `json:"database"`
+	User     string        `json:"user"`
+	Password string        `json:"password"`
+	SSLMode  string        `json:"sslmode"`
+	Postgres *pgxpool.Pool `json:"-"`
+	MySQL    *sql.DB       `json:"-"`
 }
 
 type DatabaseConfig struct {
@@ -35,7 +50,13 @@ type DatabaseConfig struct {
 }
 
 type QueryInput struct {
-	SQL string `json:"sql"`
+	SQL      string `json:"sql"`
+	Database string `json:"database,omitempty"`
+}
+
+type DatabaseListOutput struct {
+	Databases       []string `json:"databases"`
+	DefaultDatabase string   `json:"defaultDatabase"`
 }
 
 type QueryOutput struct {
@@ -76,6 +97,41 @@ func getDatabaseConfig() DatabaseConfig {
 	}
 
 	return cfg
+}
+
+func getDatabaseConfigs() ([]DatabaseConnection, error) {
+	raw := strings.TrimSpace(os.Getenv("DB_CONNECTIONS"))
+	if raw == "" {
+		legacy := getDatabaseConfig()
+		return []DatabaseConnection{{
+			Name: "default", Driver: legacy.Driver, DSN: legacy.DSN,
+			Host: legacy.Host, Port: legacy.Port, Database: legacy.Database,
+			User: legacy.User, Password: legacy.Password, SSLMode: legacy.SSLMode,
+		}}, nil
+	}
+
+	var configs []DatabaseConnection
+	if err := json.Unmarshal([]byte(raw), &configs); err != nil {
+		return nil, fmt.Errorf("DB_CONNECTIONS inválida: %w", err)
+	}
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("DB_CONNECTIONS deve conter pelo menos uma conexão")
+	}
+	for i := range configs {
+		configs[i].Name = strings.TrimSpace(configs[i].Name)
+		configs[i].Driver = strings.ToLower(strings.TrimSpace(configs[i].Driver))
+		configs[i].SSLMode = strings.TrimSpace(configs[i].SSLMode)
+		if configs[i].SSLMode == "" {
+			configs[i].SSLMode = "disable"
+		}
+		if configs[i].Driver == "" {
+			configs[i].Driver = inferDriverFromDSN(configs[i].DSN)
+		}
+		if configs[i].Name == "" {
+			return nil, fmt.Errorf("conexão na posição %d não tem name", i)
+		}
+	}
+	return configs, nil
 }
 
 func inferDriverFromDSN(dsn string) string {
@@ -123,38 +179,82 @@ func (cfg DatabaseConfig) buildDSN() string {
 	}
 }
 
+func (cfg DatabaseConnection) buildDSN() string {
+	return (DatabaseConfig{
+		Driver: cfg.Driver, DSN: cfg.DSN, Host: cfg.Host, Port: cfg.Port,
+		Database: cfg.Database, User: cfg.User, Password: cfg.Password, SSLMode: cfg.SSLMode,
+	}).buildDSN()
+}
+
 func (app *App) registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "query",
-		Description: fmt.Sprintf("Executa uma consulta SQL no banco configurado (%s) e retorna colunas e linhas em JSON.", app.driver),
+		Description: "Executa uma consulta SQL em um banco conectado. Informe database ou usa o banco padrão.",
 	}, app.queryTool)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_tables",
-		Description: fmt.Sprintf("Lista as tabelas do banco configurado (%s).", app.driver),
+		Description: "Lista as tabelas de um banco conectado. Informe database ou usa o banco padrão.",
 	}, app.listTablesTool)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "list_databases",
+		Description: "Lista os bancos conectados e informa qual é o banco padrão.",
+	}, app.listDatabasesTool)
+}
+
+func (app *App) connection(name string) (*DatabaseConnection, error) {
+	if name == "" {
+		name = app.defaultDatabase
+	}
+	connection, ok := app.connections[name]
+	if !ok {
+		return nil, fmt.Errorf("banco %q não encontrado; use list_databases", name)
+	}
+	return connection, nil
 }
 
 func (app *App) queryTool(ctx context.Context, _ *mcp.CallToolRequest, input QueryInput) (*mcp.CallToolResult, QueryOutput, error) {
-	switch app.driver {
+	connection, err := app.connection(input.Database)
+	if err != nil {
+		return nil, QueryOutput{}, err
+	}
+	switch connection.Driver {
 	case "postgres":
-		return queryPostgres(ctx, app.postgres, input)
+		return queryPostgres(ctx, connection.Postgres, input)
 	case "mysql":
-		return queryMySQL(ctx, app.mysql, input)
+		return queryMySQL(ctx, connection.MySQL, input)
 	default:
-		return nil, QueryOutput{}, fmt.Errorf("driver não suportado: %s", app.driver)
+		return nil, QueryOutput{}, fmt.Errorf("driver não suportado: %s", connection.Driver)
 	}
 }
 
-func (app *App) listTablesTool(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, TableListOutput, error) {
-	switch app.driver {
-	case "postgres":
-		return listTablesPostgres(ctx, app.postgres)
-	case "mysql":
-		return listTablesMySQL(ctx, app.mysql)
-	default:
-		return nil, TableListOutput{}, fmt.Errorf("driver não suportado: %s", app.driver)
+type ListTablesInput struct {
+	Database string `json:"database,omitempty"`
+}
+
+func (app *App) listTablesTool(ctx context.Context, _ *mcp.CallToolRequest, input ListTablesInput) (*mcp.CallToolResult, TableListOutput, error) {
+	connection, err := app.connection(input.Database)
+	if err != nil {
+		return nil, TableListOutput{}, err
 	}
+	switch connection.Driver {
+	case "postgres":
+		return listTablesPostgres(ctx, connection.Postgres)
+	case "mysql":
+		return listTablesMySQL(ctx, connection.MySQL)
+	default:
+		return nil, TableListOutput{}, fmt.Errorf("driver não suportado: %s", connection.Driver)
+	}
+}
+
+func (app *App) listDatabasesTool(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, DatabaseListOutput, error) {
+	databases := make([]string, 0, len(app.connections))
+	for name := range app.connections {
+		databases = append(databases, name)
+	}
+	sort.Strings(databases)
+	return nil, DatabaseListOutput{Databases: databases, DefaultDatabase: app.defaultDatabase}, nil
 }
 
 func queryPostgres(ctx context.Context, db *pgxpool.Pool, input QueryInput) (*mcp.CallToolResult, QueryOutput, error) {
@@ -357,50 +457,60 @@ func main() {
 
 	loadEnv(logger)
 
-	cfg := getDatabaseConfig()
-	dsn := cfg.buildDSN()
-	if cfg.Driver == "" || dsn == "" {
-		logger.Fatal("configuração de banco inválida; use DB_TYPE=postgres|mysql e DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD ou DB_DSN")
+	configs, err := getDatabaseConfigs()
+	if err != nil {
+		logger.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	app := &App{
-		driver: cfg.Driver,
-		logger: logger,
+	app := &App{connections: make(map[string]*DatabaseConnection), logger: logger}
+	defaultDatabase := strings.TrimSpace(os.Getenv("DB_DEFAULT"))
+	for i, cfg := range configs {
+		if cfg.Name == "" || cfg.Driver == "" || cfg.buildDSN() == "" {
+			logger.Fatalf("configuração inválida para a conexão %d (%q)", i, cfg.Name)
+		}
+		if _, exists := app.connections[cfg.Name]; exists {
+			logger.Fatalf("nome de conexão duplicado: %s", cfg.Name)
+		}
+
+		connection := cfg
+		switch cfg.Driver {
+		case "postgres":
+			db, err := pgxpool.New(ctx, cfg.buildDSN())
+			if err != nil {
+				logger.Fatalf("erro ao abrir pool Postgres %q: %v", cfg.Name, err)
+			}
+			if err := db.Ping(ctx); err != nil {
+				logger.Fatalf("erro ao conectar no Postgres %q: %v", cfg.Name, err)
+			}
+			connection.Postgres = db
+		case "mysql":
+			db, err := sql.Open("mysql", cfg.buildDSN())
+			if err != nil {
+				logger.Fatalf("erro ao abrir conexão MySQL %q: %v", cfg.Name, err)
+			}
+			db.SetConnMaxLifetime(time.Minute * 5)
+			db.SetMaxOpenConns(10)
+			db.SetMaxIdleConns(10)
+			if err := db.PingContext(ctx); err != nil {
+				logger.Fatalf("erro ao conectar no MySQL %q: %v", cfg.Name, err)
+			}
+			connection.MySQL = db
+		default:
+			logger.Fatalf("driver não suportado na conexão %q: %s", cfg.Name, cfg.Driver)
+		}
+		app.connections[cfg.Name] = &connection
+		logger.Printf("Conexão %q (%s) realizada com sucesso", cfg.Name, cfg.Driver)
 	}
-
-	switch cfg.Driver {
-	case "postgres":
-		db, err := pgxpool.New(ctx, dsn)
-		if err != nil {
-			logger.Fatalf("erro ao abrir pool Postgres: %v", err)
-		}
-
-		if err := db.Ping(ctx); err != nil {
-			logger.Fatalf("erro ao conectar no Postgres: %v", err)
-		}
-
-		app.postgres = db
-		logger.Println("Conexão com Postgres realizada com sucesso")
-	case "mysql":
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			logger.Fatalf("erro ao abrir conexão MySQL: %v", err)
-		}
-
-		db.SetConnMaxLifetime(time.Minute * 5)
-		db.SetMaxOpenConns(10)
-		db.SetMaxIdleConns(10)
-
-		if err := db.PingContext(ctx); err != nil {
-			logger.Fatalf("erro ao conectar no MySQL: %v", err)
-		}
-
-		app.mysql = db
-		logger.Println("Conexão com MySQL realizada com sucesso")
+	if defaultDatabase == "" {
+		defaultDatabase = configs[0].Name
 	}
+	if _, ok := app.connections[defaultDatabase]; !ok {
+		logger.Fatalf("DB_DEFAULT aponta para uma conexão inexistente: %s", defaultDatabase)
+	}
+	app.defaultDatabase = defaultDatabase
 
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcp-banco",
@@ -409,7 +519,7 @@ func main() {
 
 	app.registerTools(server)
 
-	logger.Printf("MCP iniciado (driver=%s)", app.driver)
+	logger.Printf("MCP iniciado (bancos=%d, padrão=%s)", len(app.connections), app.defaultDatabase)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		logger.Fatalf("server failed: %v", err)
